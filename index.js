@@ -28,17 +28,37 @@ catastroWMS.on('tileerror', function() {
 
 L.control.layers(baseLayers, overlays).addTo(map);
 
+// Compat: algunos handlers del plugin Path.Transform esperan helpers no presentes en Leaflet moderno.
+if (!L.DomEvent.fakeStop) {
+  L.DomEvent.fakeStop = function (e) {
+    e._skipped = true;
+    L.DomEvent.stop(e);
+  };
+}
+if (!L.DomEvent.skipped) {
+  L.DomEvent.skipped = function (e) { return !!e._skipped; };
+}
+
+// Silencia logs ruidosos del plugin (caso Object { isTouch: undefined }).
+const _origLog = console.log;
+console.log = function (...args) {
+  if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'isTouch' in args[0] && Object.keys(args[0]).length === 1) {
+    return;
+  }
+  return _origLog.apply(console, args);
+};
+
 var drawnLayer = null;
 var drawnItems = new L.FeatureGroup().addTo(map);
+var uniformScalingEnabled = true;
+var rectangles = [];
+var prevActiveOnDraw = null;
+const MIN_RECT_AREA_M2 = 100;
+var isDrawing = false;
 var drawControl = new L.Control.Draw({
   draw: { rectangle: true, polygon: false, polyline: false, circle: false, marker: false, circlemarker: false },
 });
 map.addControl(drawControl);
-
-const search = new GeoSearch.GeoSearchControl({
-  provider: new GeoSearch.OpenStreetMapProvider(),
-});
-map.addControl(search);
 
 const github = L.control({ position: 'topleft' });
 const GITHUB_URL = "https://github.com/OSM-es/descarga-catastro"
@@ -49,6 +69,15 @@ github.onAdd = function () {
 </svg></a>`;
   return this._div;
 }
+// Búsqueda geocodificada (colocada encima del control de GitHub)
+if (window.GeoSearch && GeoSearch.GeoSearchControl && GeoSearch.OpenStreetMapProvider) {
+  const search = new GeoSearch.GeoSearchControl({
+    provider: new GeoSearch.OpenStreetMapProvider(),
+    position: 'topleft'
+  });
+  map.addControl(search);
+}
+
 github.addTo(map);
 
 // key en sessionStorage
@@ -163,10 +192,378 @@ function setInputsFromBounds(bounds) {
   updateAreaInfo();
 }
 
+// UI: toggle escalado uniforme para transformaciones
+const uniformScalingToggle = document.getElementById('uniformScalingToggle');
+if (uniformScalingToggle) {
+  uniformScalingEnabled = !!uniformScalingToggle.checked;
+  uniformScalingToggle.addEventListener('change', function () {
+    uniformScalingEnabled = !!uniformScalingToggle.checked;
+    if (drawnLayer) {
+      disableRectangleTransform(drawnLayer);
+      enableRectangleTransform(drawnLayer);
+    }
+  });
+}
+
+function hasValidLatLngs(layer) {
+  if (!layer || typeof layer.getLatLngs !== 'function') return false;
+  let latlngs = layer.getLatLngs();
+  if (!latlngs) return false;
+  if (Array.isArray(latlngs[0])) latlngs = latlngs[0]; // polygon ring
+  if (!Array.isArray(latlngs) || latlngs.length < 2) return false;
+  return latlngs.every(function (p) {
+    return p && Number.isFinite(p.lat) && Number.isFinite(p.lng);
+  });
+}
+
+function getPolygonArea(layer) {
+  try {
+    if (!hasValidLatLngs(layer) || !L.GeometryUtil || typeof L.GeometryUtil.geodesicArea !== 'function') return null;
+    let latlngs = layer.getLatLngs();
+    if (Array.isArray(latlngs) && Array.isArray(latlngs[0])) {
+      latlngs = latlngs[0];
+    }
+    if (!latlngs || latlngs.length < 3) return null;
+    const area = Math.abs(L.GeometryUtil.geodesicArea(latlngs));
+    return Number.isFinite(area) ? area : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function getValidBounds(layer) {
+  if (!layer || !layer._map || typeof layer.getBounds !== 'function') return null;
+  if (!hasValidLatLngs(layer)) return null;
+  let b;
+  try {
+    b = layer.getBounds();
+  } catch (err) {
+    return null;
+  }
+  if (!b || !b.getSouthWest || !b.getNorthEast) return null;
+  const sw = b.getSouthWest();
+  const ne = b.getNorthEast();
+  if (!sw || !ne) return null;
+  if (!Number.isFinite(sw.lat) || !Number.isFinite(sw.lng) || !Number.isFinite(ne.lat) || !Number.isFinite(ne.lng)) return null;
+  return b;
+}
+
+function disableRectangleTransform(layer) {
+  if (!layer) return;
+  const sync = layer._transformSync;
+  layer.off('transform transformstart transformed drag dragend');
+  if (layer.transform && typeof layer.transform.disable === 'function') {
+    layer.transform.disable();
+    if (layer.transform._handlesGroup) {
+      try { map.removeLayer(layer.transform._handlesGroup); } catch (e) {}
+      layer.transform._handlesGroup = null;
+    }
+    layer.transform = null;
+  }
+  if (layer.dragging && typeof layer.dragging.disable === 'function') {
+    layer.dragging.disable();
+    layer.dragging = null;
+  }
+  delete layer._transformSync;
+}
+
+function setLayerInteractive(layer, enabled) {
+  if (!layer) return;
+  const path = layer._path;
+  if (path) {
+    path.style.pointerEvents = enabled ? 'auto' : 'none';
+    if (!enabled) path.classList.add('rect-disabled'); else path.classList.remove('rect-disabled');
+  }
+}
+
+function setAllRectanglesInteractive(enabled) {
+  rectangles.forEach(function (r) {
+    setLayerInteractive(r, enabled);
+  });
+}
+
+function applyRectStyle(layer, active) {
+  if (!layer || typeof layer.setStyle !== 'function') return;
+  let color;
+  if (layer._exportStatus === 'success') {
+    color = '#2ecc71'; // green OK
+  } else if (layer._exportStatus === 'error') {
+    color = '#e74c3c'; // red error
+  } else {
+    color = active ? '#3388ff' : '#f1c40f'; // active blue, inactive bright amber
+  }
+  layer.setStyle({
+    color: color,
+    fillColor: color,
+    fillOpacity: active ? 0.25 : 0.18,
+    opacity: 1
+  });
+}
+
+function setLayerActiveState(layer, active) {
+  if (!layer) return;
+  const path = layer._path;
+  if (path) {
+    path.classList.toggle('rect-active', active);
+    path.classList.toggle('rect-inactive', !active);
+  }
+  applyRectStyle(layer, active);
+  if (active) {
+    enableRectangleTransform(layer);
+  } else {
+    disableRectangleTransform(layer);
+    // Dejar clicable aunque inactivo
+    if (path) path.style.pointerEvents = 'auto';
+  }
+}
+
+function activateRectangle(layer) {
+  if (!layer) return;
+  if (drawnLayer && drawnLayer !== layer) {
+    setLayerActiveState(drawnLayer, false);
+  }
+  drawnLayer = layer;
+  setLayerActiveState(layer, true);
+  const b = getValidBounds(layer);
+  if (b) setInputsFromBounds(b);
+  updateExportStatusUI();
+}
+
+function clearBoundsUI() {
+  setSpanValue('xmin', null);
+  setSpanValue('ymin', null);
+  setSpanValue('xmax', null);
+  setSpanValue('ymax', null);
+  updateExportStatusUI();
+}
+
+function removeRectangle(layer) {
+  if (!layer) return;
+  const idx = rectangles.indexOf(layer);
+  disableRectangleTransform(layer);
+  map.removeLayer(layer);
+  rectangles = rectangles.filter(l => l !== layer);
+  const wasActive = layer === drawnLayer;
+  if (wasActive) {
+    let next = null;
+    if (rectangles.length) {
+      if (idx > 0 && rectangles[idx - 1]) {
+        next = rectangles[idx - 1];
+      } else {
+        next = rectangles[0];
+      }
+    }
+    drawnLayer = null;
+    if (next) {
+      activateRectangle(next);
+    } else {
+      clearBoundsUI();
+      updateAreaInfo();
+      document.getElementById('exportBtn').disabled = true;
+      document.getElementById('josmBtn').disabled = true;
+      updateExportStatusUI();
+    }
+  }
+}
+
+function markExportResult(status) {
+  if (!drawnLayer) return;
+  drawnLayer._exportStatus = status; // 'success' | 'error'
+  applyRectStyle(drawnLayer, true);
+  updateExportStatusUI();
+}
+
+function updateExportStatusUI(message) {
+  const box = document.getElementById('exportStatus');
+  if (!box) return;
+
+  // Mostrar solo si hay rectángulo activo y con estado de export distinto de null
+  if (!drawnLayer || !drawnLayer._exportStatus) {
+    box.style.display = 'none';
+    box.textContent = '';
+    box.classList.remove('success', 'error');
+    return;
+  }
+
+  const status = drawnLayer._exportStatus;
+  const msg = message || drawnLayer._exportMessage || (status === 'success' ? 'Exportación completada.' : 'Exportación con errores');
+
+  const label = status === 'success' ? 'ÉXITO' : 'ERROR';
+  box.innerHTML = `<div class="label">${label}</div><div>${msg}</div>`;
+  box.classList.remove('success', 'error');
+  if (status === 'success') box.classList.add('success');
+  if (status === 'error') box.classList.add('error');
+  box.style.display = 'block';
+}
+
+// Delete key removes the active rectangle
+document.addEventListener('keydown', function (ev) {
+  if (ev.key === 'Delete' || ev.key === 'Del' || ev.keyCode === 46) {
+    if (drawnLayer) {
+      removeRectangle(drawnLayer);
+      ev.preventDefault();
+    }
+  }
+});
+
+function enableRectangleTransform(layer) {
+  if (!layer) return;
+  if (!hasValidLatLngs(layer)) {
+    // Esperar a que Leaflet.Draw complete los vértices (caso click-click)
+    setTimeout(function () { enableRectangleTransform(layer); }, 50);
+    return;
+  }
+
+  function syncBounds() {
+    try {
+      if (!hasValidLatLngs(layer)) return;
+      const b = getValidBounds(layer);
+      if (!b) return;
+      setInputsFromBounds(b);
+    } catch (err) {
+      console.debug('syncBounds skipped:', err);
+    }
+  }
+  layer._transformSync = syncBounds;
+
+  // Init handlers if missing
+  if ((!layer.transform || typeof layer.transform.enable !== 'function') && L.Handler && L.Handler.PathTransform) {
+    try {
+      layer.transform = new L.Handler.PathTransform(layer);
+    } catch (err) {
+      console.warn('No se pudo inicializar PathTransform:', err);
+    }
+  }
+
+  if (layer.transform && typeof layer.transform.enable === 'function') {
+    layer.transform.enable({
+      rotation: true,
+      scaling: true,
+      uniformScaling: uniformScalingEnabled
+    });
+    layer.off('transform', syncBounds);
+    layer.off('transformed', syncBounds);
+    layer.on('transform', function () {
+      layer._exportStatus = null;
+      layer._exportMessage = '';
+      applyRectStyle(layer, true);
+      updateExportStatusUI();
+      syncBounds();
+    });
+    layer.on('transformed', function () {
+      layer._exportStatus = null;
+      layer._exportMessage = '';
+      applyRectStyle(layer, true);
+      updateExportStatusUI();
+      syncBounds();
+    });
+  }
+
+  // Drag support (Path.Drag can also require explicit handler initialization).
+  if ((!layer.dragging || typeof layer.dragging.enable !== 'function') && L.Handler && L.Handler.PathDrag) {
+    try {
+      layer.dragging = new L.Handler.PathDrag(layer);
+    } catch (err) {
+      console.warn('No se pudo inicializar PathDrag:', err);
+    }
+  }
+
+  if (layer.dragging && typeof layer.dragging.enable === 'function') {
+    layer.dragging.enable();
+    layer.off('drag', syncBounds);
+    layer.off('dragend', syncBounds);
+    layer.on('drag', function () {
+      layer._exportStatus = null;
+      layer._exportMessage = '';
+      applyRectStyle(layer, true);
+      updateExportStatusUI();
+      syncBounds();
+    });
+    layer.on('dragend', function () {
+      layer._exportStatus = null;
+      layer._exportMessage = '';
+      applyRectStyle(layer, true);
+      updateExportStatusUI();
+      syncBounds();
+    });
+  }
+
+  const b = getValidBounds(layer);
+  if (b) setInputsFromBounds(b);
+}
+map.on(L.Draw.Event.DRAWSTART, function () {
+  isDrawing = true;
+  setAllRectanglesInteractive(false);
+  // Inactivar el actual mientras se dibuja uno nuevo
+  if (drawnLayer) {
+    prevActiveOnDraw = drawnLayer;
+    setLayerActiveState(drawnLayer, false);
+  } else {
+    prevActiveOnDraw = null;
+  }
+  drawnLayer = null;
+  clearBoundsUI();
+  updateAreaInfo();
+  document.getElementById('exportBtn').disabled = true;
+  document.getElementById('josmBtn').disabled = true;
+  updateExportStatusUI();
+});
+
 map.on(L.Draw.Event.CREATED, function (e) {
-  if (drawnLayer) { map.removeLayer(drawnLayer); }
-  drawnLayer = e.layer.addTo(map);
-  setInputsFromBounds(drawnLayer.getBounds());
+  const layer = e.layer.addTo(map);
+  layer._exportStatus = null;
+  layer._exportMessage = '';
+
+  // calcular área; si es demasiado pequeña, eliminar y restaurar anterior
+  const areaPoly = getPolygonArea(layer);
+  const b = getValidBounds(layer);
+  const areaBBox = b ? estimateRectArea(b.getWest(), b.getSouth(), b.getEast(), b.getNorth()) : null;
+  const areaM2 = areaPoly != null ? areaPoly : areaBBox;
+
+  if (areaM2 != null && areaM2 < MIN_RECT_AREA_M2) {
+    map.removeLayer(layer);
+    if (prevActiveOnDraw) {
+      setLayerActiveState(prevActiveOnDraw, true);
+      drawnLayer = prevActiveOnDraw;
+      const bPrev = getValidBounds(prevActiveOnDraw);
+      if (bPrev) setInputsFromBounds(bPrev);
+    } else {
+      drawnLayer = null;
+      clearBoundsUI();
+      updateAreaInfo();
+      document.getElementById('exportBtn').disabled = true;
+      document.getElementById('josmBtn').disabled = true;
+    }
+    isDrawing = false;
+    setAllRectanglesInteractive(true);
+    return;
+  }
+
+  rectangles.push(layer);
+  layer.on('click', function () {
+    if (isDrawing) return;
+    activateRectangle(layer);
+  });
+  layer.on('mousedown', function (ev) {
+    if (ev.originalEvent && ev.originalEvent.button === 1) {
+      L.DomEvent.preventDefault(ev.originalEvent);
+      L.DomEvent.stopPropagation(ev.originalEvent);
+      removeRectangle(layer);
+    }
+  });
+  // Asegurar pointer events activos para selección futura
+  setLayerInteractive(layer, true);
+  activateRectangle(layer);
+  isDrawing = false;
+  setAllRectanglesInteractive(true);
+  updateExportStatusUI();
+});
+
+map.on(L.Draw.Event.DRAWSTOP, function () {
+  if (isDrawing) {
+    isDrawing = false;
+    setAllRectanglesInteractive(true);
+  }
 });
 
 function readCoords() {
@@ -185,19 +582,49 @@ function updateAreaInfo() {
   var exportBtn = document.getElementById('exportBtn');
   var josmBtn = document.getElementById('josmBtn');
 
-  if (![xmin, ymin, xmax, ymax].every(function (v) { return Number.isFinite(v); })) {
-    areaText.textContent = 'Área estimada: —';
+  // Área real (polígono) y área del bbox; mostramos ambas si difieren.
+  var polyArea = drawnLayer ? getPolygonArea(drawnLayer) : null;
+  var bboxArea = null;
+  if ([xmin, ymin, xmax, ymax].every(function (v) { return Number.isFinite(v); })) {
+    bboxArea = estimateRectArea(xmin, ymin, xmax, ymax);
+  }
+
+  // Para validar límite, tomamos el peor caso: max(polígono, bbox).
+  var limitArea = Math.max(polyArea != null ? polyArea : 0, bboxArea != null ? bboxArea : 0);
+
+  // Texto al usuario: mostrar limitArea y, si existe, el área real.
+  if (!Number.isFinite(limitArea) || limitArea === 0) {
+    areaText.textContent = '—';
     tooLarge.style.display = 'none';
     exportBtn.disabled = false;
     josmBtn.disabled = false;
     return;
   }
 
-  var area = estimateRectArea(xmin, ymin, xmax, ymax);
-  var areaKm2 = area / 1e6;
-  areaText.textContent = 'Área estimada: ' + areaKm2.toFixed(4) + ' km²';
+  var limitKm2 = limitArea / 1e6;
+  var baseArea = Number.isFinite(polyArea) ? polyArea : bboxArea;
+  var rotArea = Number.isFinite(bboxArea) ? bboxArea : polyArea;
+  var baseKm2 = Number.isFinite(baseArea) ? baseArea / 1e6 : limitKm2;
+  var pills = [];
 
-  if (area > 0.5e6) {
+  // Siempre mostrar el área base (polígono real si existe, si no bbox).
+  pills.push('<span class="pill pill-alt">Base: ' + baseKm2.toFixed(4) + ' km²</span>');
+
+  // Mostrar Giro solo si hay ambos valores y la diferencia es apreciable (0.5% o >1 m²).
+  var showRot = Number.isFinite(rotArea) && Number.isFinite(baseArea);
+  if (showRot) {
+    var diff = Math.abs(rotArea - baseArea);
+    var rotated = diff > Math.max(1, baseArea * 0.005);
+    if (rotated) {
+      pills.push('<span class="pill">Giro: ' + (rotArea / 1e6).toFixed(4) + ' km²</span>');
+    }
+  }
+
+  // Si solo hay un valor válido, no añadimos Giro extra.
+
+  areaText.innerHTML = '<div class="pill-row">' + pills.join('') + '</div>';
+
+  if (limitArea > 0.5e6) {
     tooLarge.style.display = 'block';
     exportBtn.disabled = true;
     josmBtn.disabled = true;
@@ -226,6 +653,17 @@ document.getElementById('copyBtn').addEventListener('click', function () {
   var text = [coords.xmin, coords.ymin, coords.xmax, coords.ymax].join(" ");
   navigator.clipboard.writeText(text).catch(function (err) {
     console.error('No se pudo copiar: ', err);
+  }).then(function () {
+    var btn = document.getElementById('copyBtn');
+    if (!btn) return;
+    var originalHTML = btn.innerHTML;
+    var checkIcon = '<i class="bi bi-check-lg"></i>';
+    btn.classList.add('copied');
+    btn.innerHTML = checkIcon;
+    setTimeout(function () {
+      btn.classList.remove('copied');
+      btn.innerHTML = originalHTML;
+    }, 1400);
   });
 });
 
@@ -258,8 +696,12 @@ document.getElementById('bboxForm').addEventListener('submit', async function (e
     return;
   }
 
-  var area = estimateRectArea(xmin, ymin, xmax, ymax);
-  if (area > 0.5e6) {
+  var polyArea = drawnLayer ? getPolygonArea(drawnLayer) : null;
+  var bboxArea = estimateRectArea(xmin, ymin, xmax, ymax);
+  var limitArea = Math.max(polyArea != null ? polyArea : 0, bboxArea);
+  var areaForCheck = Number.isFinite(limitArea) && limitArea > 0 ? limitArea : (polyArea != null ? polyArea : bboxArea);
+
+  if (!Number.isFinite(areaForCheck) || limitArea > 0.5e6) {
     alert('Acércate — el área máxima permitida es 0.5 km².');
     return;
   }
@@ -295,8 +737,14 @@ document.getElementById('bboxForm').addEventListener('submit', async function (e
       a.click();
       a.remove();
     }
+    drawnLayer._exportMessage = 'Exportación completada.';
+    markExportResult('success');
   } catch (err) {
-    alert('Error: ' + (err.message || err));
+    if (drawnLayer) {
+      drawnLayer._exportMessage = (err && err.message) ? err.message : 'Error en la exportación';
+      markExportResult('error');
+    }
+    // sin alert, el estado se muestra en el panel
   } finally {
     hideModal();
   }

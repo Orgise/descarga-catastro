@@ -1,11 +1,11 @@
-<!doctype html>
+﻿<!doctype html>
 
 <html lang="es">
 
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Descarga catastro</title>
+  <title>Descarga Catastro</title>
   <meta name="title" content="Descarga catastro">
   <meta name="description" content="Selecciona un rectángulo en el mapa y descarga la información sobre edificios, partes de edificios y otras edificaciones del servicio web WFS de Catastro.">
   <meta name="description" lang="en" content="Select a rectangle on the map and download information about buildings, parts of buildings, and other constructions from the WFS web service of Catastro.">
@@ -13,6 +13,10 @@
   <meta name="robots" content="index, follow">
   <meta name="keywords" content="Catastro, OpenStreetMap, WFS, datos de edificios, información de propiedades, datos geográficos, España, comunidad OSM, descargar datos">
   <link rel="canonical" href="https://descarga-catastro.openstreetmap.es/">
+  <link rel="icon" type="image/svg+xml" href="https://wiki.openstreetmap.org/w/images/d/d4/Spanish_Cadastre_Buildings_Import.svg">
+  <link rel="icon" type="image/png" sizes="240x240" href="https://wiki.openstreetmap.org/w/images/thumb/d/d4/Spanish_Cadastre_Buildings_Import.svg/240px-Spanish_Cadastre_Buildings_Import.svg.png">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-geosearch/dist/geosearch.css" />
@@ -24,50 +28,84 @@
     <div id="map"></div>
 
     <div id="side">
-      <h2>Descarga edificios catastro</h2>
-      <div class="note">Dibuja un rectángulo en el mapa. Máx 0.5 km².</div>
-      <div class="note">En caso de que dicho rectángulo atraviese edificios o partes, estos no serán incluidos en la
-        descarga.</div>
-
-      <form id="bboxForm" class="note" method="post" action="/export" autocomplete="off">
-        <div class="bbox-row">
-          <span id="xmin" data-placeholder="xmin" class="bbox-text empty">xmin</span>
-          <span id="ymin" data-placeholder="ymin" class="bbox-text empty">ymin</span>
-          <span id="xmax" data-placeholder="xmax" class="bbox-text empty">xmax</span>
-          <span id="ymax" data-placeholder="ymax" class="bbox-text empty">ymax</span>
+      <div class="side-inner d-flex flex-column gap-3">
+        <div>
+          <p class="eyebrow text-uppercase mb-1">Catastro → GeoJSON</p>
+          <h2 class="mb-1">Descarga edificios catastro</h2>
+          <details class="note info-details">
+            <summary>Instrucciones</summary>
+            <ul class="mb-0">
+              <li>Dibuja un rectángulo en el mapa o introduce coordenadas. Máx 0.5 km².</li>
+              <li>Si el rectángulo corta edificios o partes, estos no se incluirán en la descarga.</li>
+              <li>Recuerda realizar los cambios con tu <a href="https://wiki.openstreetmap.org/wiki/ES:Importaci%C3%B3n/Directrices#Paso_6._Subiendo" target="_blank" rel="noopener noreferrer">cuenta de importación</a>.</li>
+            </ul>
+          </details>
         </div>
 
-        <input type="hidden" name="xmin" id="xmin_input" />
-        <input type="hidden" name="ymin" id="ymin_input" />
-        <input type="hidden" name="xmax" id="xmax_input" />
-        <input type="hidden" name="ymax" id="ymax_input" />
+        <div class="form-check form-switch note">
+          <input class="form-check-input" type="checkbox" id="uniformScalingToggle" checked>
+          <label class="form-check-label" for="uniformScalingToggle">Escalado uniforme (mantener proporciones)</label>
+        </div>
 
-        <div class="note" id="areaInfo">Área estimada: —</div>
+        <form id="bboxForm" class="d-flex flex-column gap-3" method="post" action="/export" autocomplete="off">
+          <div class="bbox-card rounded-3 border shadow-sm">
+            <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+              <span class="text-uppercase fw-semibold small text-primary">Coordenadas</span>
+              <div class="d-flex align-items-center gap-2">
+                <span class="badge text-bg-light text-secondary">WGS84</span>
+                <button id="copyBtn" type="button" class="btn btn-sm btn-light copy-btn" aria-label="Copiar coordenadas">
+                  <i class="bi bi-copy"></i>
+                </button>
+              </div>
+            </div>
+            <div class="bbox-row">
+              <span id="xmin" data-placeholder="xmin" class="bbox-text empty">xmin</span>
+              <span id="ymin" data-placeholder="ymin" class="bbox-text empty">ymin</span>
+              <span id="xmax" data-placeholder="xmax" class="bbox-text empty">xmax</span>
+              <span id="ymax" data-placeholder="ymax" class="bbox-text empty">ymax</span>
+            </div>
+          </div>
 
-        <div class="dialog" id="tooLarge" style="display:none;">Acércate — el área máxima permitida es 0.5 km².</div>
+          <input type="hidden" name="xmin" id="xmin_input" />
+          <input type="hidden" name="ymin" id="ymin_input" />
+          <input type="hidden" name="xmax" id="xmax_input" />
+          <input type="hidden" name="ymax" id="ymax_input" />
 
-        <button id="exportBtn" type="submit" data-action="download" disabled>Descargar</button>
-        <button id="josmBtn" type="submit" data-action="josm" disabled>JOSM</button>
-        <button id="copyBtn" type="button">Copiar coords</button>
-      </form>
+          <div class="area-panel shadow-sm border rounded-3 px-3 py-3">
+            <div class="d-flex align-items-start justify-content-between gap-3 flex-wrap">
+              <div>
+                <p class="area-label text-uppercase mb-1">Área estimada</p>
+                <div class="area-value mb-1" id="areaInfo">—</div>
+                <p class="area-hint mb-0">Se recalcula al mover o escalar el rectángulo.</p>
+              </div>
+              <span id="tooLarge" class="area-badge" style="display:none;">Máx 0.5 km²</span>
+            </div>
+          </div>
 
-      <div class="note">Recuerda realizar los cambios con <a href="https://wiki.openstreetmap.org/wiki/ES:Importaci%C3%B3n/Directrices#Paso_6._Subiendo">tu cuenta de importación</a>.</div>
-      
+          <div class="d-flex gap-2 flex-wrap">
+            <button id="exportBtn" type="submit" data-action="download" class="btn btn-primary flex-fill" disabled>Descargar</button>
+            <button id="josmBtn" type="submit" data-action="josm" class="btn btn-outline-secondary flex-fill" disabled>JOSM</button>
+          </div>
+
+        </form>
+        <div id="exportStatus" class="export-status" style="display:none;"></div>
+      </div>
     </div>
   </div>
 
   <!-- Modal -->
   <div id="modalOverlay" role="dialog" aria-modal="true">
     <div id="modalBox">
-      <div id="modalMsg" style="font-weight:600">Generando fichero, espera…</div>
+      <div id="modalMsg" style="font-weight:600">Generando fichero, espera...</div>
       <div id="progressBar">
         <div id="progressFill"></div>
       </div>
     </div>
   </div>
 
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/leaflet-path-transform@1.9.0/dist/index.js"></script>
   <script src="https://unpkg.com/leaflet-geosearch@latest/dist/bundle.min.js"></script>
   <script src="./index.js" type="module"></script>
 </body>
