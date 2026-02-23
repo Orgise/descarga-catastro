@@ -22,7 +22,7 @@ body {
 }
 
 #side {
-  width: 500px;
+  width: 560px;
   min-width: 280px;
   max-width: 560px;
   height: auto;
@@ -107,7 +107,7 @@ h2 {
 
 .bbox-text {
   font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   color: #0f172a;
   padding: 8px 10px;
   border-radius: 8px;
@@ -241,8 +241,13 @@ h2 {
 .leaflet-control-zoom.leaflet-bar .github {
   width: 30px;
   height: 30px;
-  padding: 4px;
+  padding: 1px;
 }
+
+.leaflet-control-zoom.leaflet-bar .github i {
+  font-size: 22px;
+}
+
 
 .leaflet-bar a.github {
   background: #fff;

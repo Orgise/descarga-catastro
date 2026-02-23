@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Permite editar el código en caliente.
+      - .:/app
+      # Evita que node_modules del contenedor sea sobrescrito.
+      - /app/node_modules
+    environment:
+      - PORT=8000
+    command: node server.js
