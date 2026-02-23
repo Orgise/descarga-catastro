@@ -1,6 +1,14 @@
 # Descarga catastro
 
-Esta web permite seleccionar varios rectángulos en el mapa (bounding box) y descargar la información sobre _edificios_, _partes de edificios_ y _otras edificaciones_, que se encuentren en el servicio web WFS de https://www.catastro.hacienda.gob.es/webinspire/index.html
+Esta web permite dibujar y manipular varios rectángulos en el mapa (bounding box) y descargar la información sobre *edificios*, *partes de edificios* y *otras edificaciones*, que se encuentren en el servicio web WFS de https://www.catastro.hacienda.gob.es/webinspire/index.html dentro del área dibujada.
+
+Se usan colores en los rectángulos para ayudar a organizarse cuando se exportan zonas grandes.
+
+Colores:
+
+- Ámbar: sin exportar.
+- Verde: exportación satisfactoria.
+- Rojo: fallo al exportar.
 
 ## Build local con Docker
 
