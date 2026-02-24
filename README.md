@@ -10,6 +10,12 @@ Colores:
 - Verde: exportación satisfactoria.
 - Rojo: fallo al exportar.
 
+Controles
+-------------------
+- Clic izquierdo: selccionar/mover/rotar/escalar el rectángulo activo.
+- Clic central o tecla Supr: eliminar el rectángulo.
+
+
 ## Build local con Docker
 
 ### Usando docker build

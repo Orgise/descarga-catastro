@@ -374,7 +374,7 @@ h2 {
   }
 
   #map {
-    height: 60vh;
+    height: 70vh;
     order: 1;
   }
 
@@ -406,6 +406,16 @@ h2 {
 /* Tablets */
 @media (min-width: 721px) and (max-width: 1024px) {
   #map {
-    height: 65vh;
+    height: 78vh;
+    flex: 1 1 60%;
+  }
+
+  
+  #side {
+    max-width: 40%;
+  }
+  
+  .bbox-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
