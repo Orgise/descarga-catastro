@@ -12,7 +12,7 @@ Colores:
 
 Controles
 -------------------
-- Clic izquierdo: selccionar/mover/rotar/escalar el rectángulo activo.
+- Clic izquierdo: seleccionar/mover/rotar/escalar el rectángulo activo.
 - Clic central o tecla Supr: eliminar el rectángulo.
 
 
