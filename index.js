@@ -382,14 +382,32 @@ function getPendingRectangles() {
   });
 }
 
+function getReusableExportRectangles() {
+  return rectangles.filter(function (layer) {
+    return !!(layer && layer._map && hasReusableExport(layer));
+  });
+}
+
 function updatePendingExportButton() {
   const btn = document.getElementById('exportPendingBtn');
-  if (!btn) return;
+  const josmAllBtn = document.getElementById('josmAllBtn');
+
   const totalPending = getPendingRectangles().length;
-  btn.disabled = isBatchExporting || totalPending === 0;
-  btn.textContent = totalPending > 0
-    ? `Procesar rectángulos ámbar (${totalPending})`
-    : 'Procesar rectángulos ámbar';
+  const totalReusable = getReusableExportRectangles().length;
+
+  if (btn) {
+    btn.disabled = isBatchExporting || totalPending === 0;
+    btn.textContent = totalPending > 0
+      ? `Procesar rectángulos ámbar (${totalPending})`
+      : 'Procesar rectángulos ámbar';
+  }
+
+  if (josmAllBtn) {
+    josmAllBtn.disabled = isBatchExporting || totalReusable === 0;
+    josmAllBtn.textContent = totalReusable > 0
+      ? `JOSM rectángulos verdes (${totalReusable})`
+      : 'JOSM rectángulos verdes';
+  }
 }
 
 function clearLayerExportCache(layer) {
@@ -1000,19 +1018,47 @@ function triggerBrowserDownload(url, filename) {
   a.remove();
 }
 
+function buildJosmImportUrl(publicUrl, layerName) {
+  const params = new URLSearchParams();
+  params.set('new_layer', 'true');
+  params.set('changeset_tags', `source=Dirección General del Catastro|created_by=${GITHUB_URL}|hashtags=catastro-es`);
+  if (layerName) params.set('layer_name', layerName);
+  params.set('url', publicUrl);
+  return `http://127.0.0.1:8111/import?${params.toString()}`;
+}
+
+function sendLayerToJosm(layer, layerName) {
+  if (!layer || !layer._exportCache || !layer._exportCache.publicUrl) return false;
+  const josmUrl = buildJosmImportUrl(layer._exportCache.publicUrl, layerName);
+  window.open(josmUrl);
+  return true;
+}
+
 function triggerLayerAction(layer, action) {
   if (!hasReusableExport(layer)) return false;
   const chosenAction = action === 'josm' ? 'josm' : 'download';
 
   if (chosenAction === 'josm') {
-    const josmUrl = `http://127.0.0.1:8111/import?new_layer=true&changeset_tags=source=Dirección General del Catastro|created_by=${GITHUB_URL}|hashtags=catastro-es&url=${layer._exportCache.publicUrl}`;
-    window.open(josmUrl);
-    return true;
+    return sendLayerToJosm(layer);
   }
 
   const downloadUrl = layer._exportCache.objectUrl || layer._exportCache.publicUrl;
   triggerBrowserDownload(downloadUrl, layer._exportCache.filename);
   return true;
+}
+
+function sendAllGreenToJosm() {
+  if (isBatchExporting) return;
+  const reusableLayers = getReusableExportRectangles();
+  if (!reusableLayers.length) {
+    alert('No hay rectángulos verdes disponibles para enviar a JOSM.');
+    return;
+  }
+
+  reusableLayers.forEach(function (layer, idx) {
+    const layerName = `catastro_${String(idx + 1).padStart(2, '0')}`;
+    sendLayerToJosm(layer, layerName);
+  });
 }
 
 async function exportPendingRectangles() {
@@ -1063,6 +1109,11 @@ async function exportPendingRectangles() {
 document.getElementById('exportPendingBtn').addEventListener('click', function () {
   if (isBatchExporting) return;
   exportPendingRectangles();
+});
+
+document.getElementById('josmAllBtn').addEventListener('click', function () {
+  if (isBatchExporting) return;
+  sendAllGreenToJosm();
 });
 
 document.getElementById('bboxForm').addEventListener('submit', async function (ev) {

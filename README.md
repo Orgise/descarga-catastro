@@ -18,6 +18,7 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 - Cálculo de área en tiempo real y validación de límite máximo.
 - Exportación a fichero (`Descargar`) o envío directo a `JOSM`.
 - Procesamiento masivo de rectángulos ámbar con progreso `(n/X completados)`.
+- Envío masivo a JOSM de todos los rectángulos verdes.
 - Reutilización de exportaciones correctas: rectángulos verdes se descargan/abren sin relanzar exportación.
 - Estado visual por rectángulo (pendiente, éxito, error).
 - Búsqueda de ubicaciones, selector de capas y persistencia de vista del mapa en la sesión.
@@ -53,6 +54,9 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 10. Una vez un rectángulo esté en verde:
    - `Descargar` o `JOSM` reutiliza su exportación ya preparada.
    - No se vuelve a lanzar `/export` para ese rectángulo mientras no cambie su geometría.
+11. Para enviar todos los verdes a JOSM:
+   - Pulsa `JOSM rectángulos verdes (X)`.
+   - Se enviará una importación por cada rectángulo verde (una capa por elemento).
 
 ## Controles
 
@@ -62,6 +66,7 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 - Clic central en rectángulo: elimina ese rectángulo.
 - Tecla `Supr`: elimina el rectángulo activo.
 - Botón `Procesar rectángulos ámbar`: exporta en secuencia todos los pendientes.
+- Botón `JOSM rectángulos verdes`: envía en lote todos los exportados con éxito.
 
 ## Reglas y validaciones
 
@@ -93,6 +98,8 @@ Para que funcione el botón `JOSM`:
 3. Permite peticiones locales a `http://127.0.0.1:8111`.
 
 Si el navegador bloquea ventanas emergentes, permite popups para este sitio.
+
+Para el envío masivo de verdes, el navegador puede solicitar permiso para múltiples aperturas hacia Remote Control.
 
 ## Ejecución local
 
