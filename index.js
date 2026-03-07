@@ -55,6 +55,7 @@ var rectangles = [];
 var prevActiveOnDraw = null;
 const MIN_RECT_AREA_M2 = 100;
 var isDrawing = false;
+var isBatchExporting = false;
 var drawControl = new L.Control.Draw({
   draw: { rectangle: true, polygon: false, polyline: false, circle: false, marker: false, circlemarker: false },
 });
@@ -375,6 +376,42 @@ function setAllRectanglesInteractive(enabled) {
   });
 }
 
+function getPendingRectangles() {
+  return rectangles.filter(function (layer) {
+    return !!(layer && layer._map && !layer._exportStatus);
+  });
+}
+
+function updatePendingExportButton() {
+  const btn = document.getElementById('exportPendingBtn');
+  if (!btn) return;
+  const totalPending = getPendingRectangles().length;
+  btn.disabled = isBatchExporting || totalPending === 0;
+  btn.textContent = totalPending > 0
+    ? `Procesar rectángulos ámbar (${totalPending})`
+    : 'Procesar rectángulos ámbar';
+}
+
+function clearLayerExportCache(layer) {
+  if (!layer || !layer._exportCache) return;
+  if (layer._exportCache.objectUrl) {
+    try {
+      URL.revokeObjectURL(layer._exportCache.objectUrl);
+    } catch (err) {
+      console.warn('No se pudo liberar object URL:', err);
+    }
+  }
+  layer._exportCache = null;
+}
+
+function resetLayerExportState(layer) {
+  if (!layer) return;
+  clearLayerExportCache(layer);
+  layer._exportStatus = null;
+  layer._exportMessage = '';
+  updatePendingExportButton();
+}
+
 function applyRectStyle(layer, active) {
   if (!layer || typeof layer.setStyle !== 'function') return;
   let color;
@@ -434,8 +471,10 @@ function removeRectangle(layer) {
   if (!layer) return;
   const idx = rectangles.indexOf(layer);
   disableRectangleTransform(layer);
+  clearLayerExportCache(layer);
   map.removeLayer(layer);
   rectangles = rectangles.filter(l => l !== layer);
+  updatePendingExportButton();
   const wasActive = layer === drawnLayer;
   if (wasActive) {
     let next = null;
@@ -468,8 +507,7 @@ function cloneRectangleLayer(sourceLayer) {
 
   const clone = L.polygon(clonedLatLngs, cloneOptions).addTo(map);
   rebuildLayerBounds(clone);
-  clone._exportStatus = null;
-  clone._exportMessage = '';
+  resetLayerExportState(clone);
 
   setupRectangleLayer(clone);
   activateRectangle(clone);
@@ -481,11 +519,13 @@ function cloneRectangleLayer(sourceLayer) {
 function setupRectangleLayer(layer) {
   if (!layer) return;
   rectangles.push(layer);
+  updatePendingExportButton();
   layer.on('click', function () {
-    if (isDrawing) return;
+    if (isDrawing || isBatchExporting) return;
     activateRectangle(layer);
   });
   layer.on('mousedown', function (ev) {
+    if (isBatchExporting) return;
     if (ev.originalEvent && ev.originalEvent.button === 1) {
       L.DomEvent.preventDefault(ev.originalEvent);
       L.DomEvent.stopPropagation(ev.originalEvent);
@@ -493,7 +533,7 @@ function setupRectangleLayer(layer) {
     }
   });
   layer.on('contextmenu', function (ev) {
-    if (isDrawing) return;
+    if (isDrawing || isBatchExporting) return;
     const originalEvent = ev && ev.originalEvent ? ev.originalEvent : ev;
     if (originalEvent) {
       L.DomEvent.preventDefault(originalEvent);
@@ -508,11 +548,14 @@ function setupRectangleLayer(layer) {
   setLayerInteractive(layer, true);
 }
 
-function markExportResult(status) {
-  if (!drawnLayer) return;
-  drawnLayer._exportStatus = status; // 'success' | 'error'
-  applyRectStyle(drawnLayer, true);
-  updateExportStatusUI();
+function setLayerExportResult(layer, status, message) {
+  if (!layer) return;
+  if (status !== 'success') clearLayerExportCache(layer);
+  layer._exportStatus = status; // 'success' | 'error'
+  layer._exportMessage = message || '';
+  applyRectStyle(layer, layer === drawnLayer);
+  if (layer === drawnLayer) updateExportStatusUI();
+  updatePendingExportButton();
 }
 
 function updateExportStatusUI(message) {
@@ -540,6 +583,7 @@ function updateExportStatusUI(message) {
 
 // Delete key removes the active rectangle
 document.addEventListener('keydown', function (ev) {
+  if (isBatchExporting) return;
   if (ev.key === 'Delete' || ev.key === 'Del' || ev.keyCode === 46) {
     if (drawnLayer) {
       removeRectangle(drawnLayer);
@@ -603,15 +647,13 @@ function enableRectangleTransform(layer) {
     layer.off('transform', syncBounds);
     layer.off('transformed', syncBounds);
     layer.on('transform', function () {
-      layer._exportStatus = null;
-      layer._exportMessage = '';
+      resetLayerExportState(layer);
       applyRectStyle(layer, true);
       updateExportStatusUI();
       syncBounds();
     });
     layer.on('transformed', function () {
-      layer._exportStatus = null;
-      layer._exportMessage = '';
+      resetLayerExportState(layer);
       applyRectStyle(layer, true);
       updateExportStatusUI();
       syncBounds();
@@ -632,15 +674,13 @@ function enableRectangleTransform(layer) {
     layer.off('drag', syncBounds);
     layer.off('dragend', syncBounds);
     layer.on('drag', function () {
-      layer._exportStatus = null;
-      layer._exportMessage = '';
+      resetLayerExportState(layer);
       applyRectStyle(layer, true);
       updateExportStatusUI();
       syncBounds();
     });
     layer.on('dragend', function () {
-      layer._exportStatus = null;
-      layer._exportMessage = '';
+      resetLayerExportState(layer);
       applyRectStyle(layer, true);
       updateExportStatusUI();
       syncBounds();
@@ -651,6 +691,7 @@ function enableRectangleTransform(layer) {
   if (b) setInputsFromBounds(b);
 }
 map.on(L.Draw.Event.DRAWSTART, function () {
+  if (isBatchExporting) return;
   isDrawing = true;
   setAllRectanglesInteractive(false);
   // Inactivar el actual mientras se dibuja uno nuevo
@@ -669,9 +710,9 @@ map.on(L.Draw.Event.DRAWSTART, function () {
 });
 
 map.on(L.Draw.Event.CREATED, function (e) {
+  if (isBatchExporting) return;
   const layer = e.layer.addTo(map);
-  layer._exportStatus = null;
-  layer._exportMessage = '';
+  resetLayerExportState(layer);
 
   // calcular área; si es demasiado pequeña, eliminar y restaurar anterior
   const areaPoly = getPolygonArea(layer);
@@ -706,6 +747,7 @@ map.on(L.Draw.Event.CREATED, function (e) {
 });
 
 map.on(L.Draw.Event.DRAWSTOP, function () {
+  if (isBatchExporting) return;
   if (isDrawing) {
     isDrawing = false;
     setAllRectanglesInteractive(true);
@@ -781,17 +823,47 @@ function updateAreaInfo() {
   }
 }
 
-// Modal helpers and fake progress
-function showModal() {
-  document.getElementById('modalOverlay').style.display = 'flex';
-  startProgress();
+// Modal helpers
+let progressTimer = null;
+
+function setModalMessage(message) {
+  const msg = document.getElementById('modalMsg');
+  if (msg) msg.textContent = message;
 }
+
+function setModalProgress(percent) {
+  const fill = document.getElementById('progressFill');
+  if (!fill) return;
+  const safe = Math.max(0, Math.min(100, Number(percent) || 0));
+  fill.style.width = safe.toFixed(1) + '%';
+}
+
+function showModal(options) {
+  const opts = options || {};
+  const indeterminate = !opts.determinate;
+  document.getElementById('modalOverlay').style.display = 'flex';
+  setModalMessage(opts.message || 'Generando fichero, espera...');
+  stopProgress(false);
+  if (indeterminate) {
+    startProgress();
+  } else {
+    setModalProgress(opts.progress || 0);
+  }
+}
+
+function updateBatchModal(completed, total) {
+  const safeTotal = total > 0 ? total : 1;
+  setModalMessage(`Procesando, espera... (${completed}/${total} completados)`);
+  setModalProgress((completed / safeTotal) * 100);
+}
+
 function hideModal() {
+  stopProgress(true);
   document.getElementById('modalOverlay').style.display = 'none';
-  stopProgress();
 }
 
 document.getElementById('copyBtn').addEventListener('click', function () {
+  if (isBatchExporting) return;
   var coords = readCoords();
   if (![coords.xmin, coords.ymin, coords.xmax, coords.ymax].every(function (v) { return Number.isFinite(v); })) {
     return;
@@ -813,9 +885,10 @@ document.getElementById('copyBtn').addEventListener('click', function () {
   });
 });
 
-let progressTimer = null;
 function startProgress() {
   const fill = document.getElementById('progressFill');
+  if (!fill) return;
+  stopProgress(false);
   let pct = 0;
   fill.style.width = '0%';
   progressTimer = setInterval(() => {
@@ -824,74 +897,208 @@ function startProgress() {
     fill.style.width = pct.toFixed(1) + '%';
   }, 400);
 }
-function stopProgress() {
-  clearInterval(progressTimer);
-  document.getElementById('progressFill').style.width = '100%';
+function stopProgress(completeBar) {
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+  if (completeBar) {
+    setModalProgress(100);
+  }
 }
+
+function getLayerCoords(layer) {
+  const b = getValidBounds(layer);
+  if (!b) throw new Error('Coordenadas inválidas.');
+  return {
+    xmin: b.getWest(),
+    ymin: b.getSouth(),
+    xmax: b.getEast(),
+    ymax: b.getNorth()
+  };
+}
+
+function validateLayerAreaForExport(layer, coords) {
+  const polyArea = getPolygonArea(layer);
+  const bboxArea = estimateRectArea(coords.xmin, coords.ymin, coords.xmax, coords.ymax);
+  const limitArea = Math.max(polyArea != null ? polyArea : 0, bboxArea != null ? bboxArea : 0);
+  const areaForCheck = Number.isFinite(limitArea) && limitArea > 0 ? limitArea : (polyArea != null ? polyArea : bboxArea);
+  if (!Number.isFinite(areaForCheck) || limitArea > 0.5e6) {
+    throw new Error('Acércate — el área máxima permitida es 0.5 km².');
+  }
+}
+
+async function requestLayerExport(coords) {
+  const data = new URLSearchParams();
+  data.set('xmin', String(coords.xmin));
+  data.set('ymin', String(coords.ymin));
+  data.set('xmax', String(coords.xmax));
+  data.set('ymax', String(coords.ymax));
+
+  const resp = await fetch('/export', {
+    method: 'POST',
+    body: data
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(txt || 'Server error');
+  }
+
+  const j = await resp.json();
+  if (!j.ok || !j.publicUrl) throw new Error('No public URL returned');
+  return j;
+}
+
+async function cacheLayerExport(layer, exportInfo) {
+  if (!layer || !exportInfo) return null;
+  clearLayerExportCache(layer);
+  const cache = {
+    filename: exportInfo.filename || 'catastro.geojson',
+    publicUrl: exportInfo.publicUrl,
+    objectUrl: null
+  };
+
+  try {
+    const fileResp = await fetch(exportInfo.publicUrl);
+    if (fileResp.ok) {
+      const blob = await fileResp.blob();
+      cache.objectUrl = URL.createObjectURL(blob);
+    }
+  } catch (err) {
+    console.warn('No se pudo cachear el GeoJSON localmente:', err);
+  }
+
+  layer._exportCache = cache;
+  return cache;
+}
+
+async function exportLayer(layer) {
+  if (!layer) throw new Error('No hay rectángulo activo.');
+  const coords = getLayerCoords(layer);
+  validateLayerAreaForExport(layer, coords);
+  const exportInfo = await requestLayerExport(coords);
+  await cacheLayerExport(layer, exportInfo);
+  return exportInfo;
+}
+
+function hasReusableExport(layer) {
+  return !!(
+    layer &&
+    layer._exportStatus === 'success' &&
+    layer._exportCache &&
+    layer._exportCache.publicUrl
+  );
+}
+
+function triggerBrowserDownload(url, filename) {
+  if (!url) return;
+  const a = document.createElement('a');
+  a.href = url;
+  if (filename) a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function triggerLayerAction(layer, action) {
+  if (!hasReusableExport(layer)) return false;
+  const chosenAction = action === 'josm' ? 'josm' : 'download';
+
+  if (chosenAction === 'josm') {
+    const josmUrl = `http://127.0.0.1:8111/import?new_layer=true&changeset_tags=source=Dirección General del Catastro|created_by=${GITHUB_URL}|hashtags=catastro-es&url=${layer._exportCache.publicUrl}`;
+    window.open(josmUrl);
+    return true;
+  }
+
+  const downloadUrl = layer._exportCache.objectUrl || layer._exportCache.publicUrl;
+  triggerBrowserDownload(downloadUrl, layer._exportCache.filename);
+  return true;
+}
+
+async function exportPendingRectangles() {
+  if (isBatchExporting) return;
+  const pending = getPendingRectangles();
+  if (!pending.length) return;
+
+  isBatchExporting = true;
+  updatePendingExportButton();
+  setAllRectanglesInteractive(false);
+  showModal({
+    determinate: true,
+    message: `Procesando, espera... (0/${pending.length} completados)`,
+    progress: 0
+  });
+
+  let completed = 0;
+  const total = pending.length;
+  try {
+    for (const layer of pending) {
+      if (!layer || !layer._map) {
+        completed += 1;
+        updateBatchModal(completed, total);
+        continue;
+      }
+      try {
+        await exportLayer(layer);
+        setLayerExportResult(layer, 'success', 'Exportación completada.');
+      } catch (err) {
+        const message = (err && err.message) ? err.message : 'Error en la exportación';
+        setLayerExportResult(layer, 'error', message);
+      }
+      completed += 1;
+      updateBatchModal(completed, total);
+    }
+  } finally {
+    isBatchExporting = false;
+    hideModal();
+    setAllRectanglesInteractive(true);
+    if (drawnLayer) {
+      applyRectStyle(drawnLayer, true);
+      updateExportStatusUI();
+    }
+    updatePendingExportButton();
+  }
+}
+
+document.getElementById('exportPendingBtn').addEventListener('click', function () {
+  if (isBatchExporting) return;
+  exportPendingRectangles();
+});
 
 document.getElementById('bboxForm').addEventListener('submit', async function (ev) {
   ev.preventDefault();
-
-  var xmin = parseFloat(document.getElementById('xmin_input').value);
-  var ymin = parseFloat(document.getElementById('ymin_input').value);
-  var xmax = parseFloat(document.getElementById('xmax_input').value);
-  var ymax = parseFloat(document.getElementById('ymax_input').value);
-
-  if (![xmin, ymin, xmax, ymax].every(function (v) { return Number.isFinite(v); })) {
-    alert('Coordenadas inválidas.');
+  if (isBatchExporting) return;
+  if (!drawnLayer) {
+    alert('No hay rectángulo activo.');
     return;
   }
 
-  var polyArea = drawnLayer ? getPolygonArea(drawnLayer) : null;
-  var bboxArea = estimateRectArea(xmin, ymin, xmax, ymax);
-  var limitArea = Math.max(polyArea != null ? polyArea : 0, bboxArea);
-  var areaForCheck = Number.isFinite(limitArea) && limitArea > 0 ? limitArea : (polyArea != null ? polyArea : bboxArea);
+  const submitter = ev.submitter || document.activeElement;
+  const action = (submitter && submitter.dataset && submitter.dataset.action) ? submitter.dataset.action : 'download';
 
-  if (!Number.isFinite(areaForCheck) || limitArea > 0.5e6) {
-    alert('Acércate — el área máxima permitida es 0.5 km².');
+  if (hasReusableExport(drawnLayer)) {
+    triggerLayerAction(drawnLayer, action);
     return;
   }
 
-  showModal();
-  const form = ev.target;
-  // FormData ya incluirá los hidden inputs
-  const data = new URLSearchParams(new FormData(form));
+  showModal({ message: 'Generando fichero, espera...' });
 
   try {
-    const resp = await fetch('/export', {
-      method: 'POST',
-      body: data
-    });
-
-    if (!resp.ok) {
-      const txt = await resp.text();
-      throw new Error(txt || 'Server error');
-    }
-
-    const j = await resp.json();
-    if (!j.ok || !j.publicUrl) throw new Error('No public URL returned');
-
-    if (document.activeElement.dataset.action  === 'josm') {
-      const josmUrl = `http://127.0.0.1:8111/import?new_layer=true&changeset_tags=source=Dirección General del Catastro|created_by=${GITHUB_URL}|hashtags=catastro-es&url=${j.publicUrl}`;
-      window.open(josmUrl);
-    } else {
-      // trigger download
-      const a = document.createElement('a');
-      a.href = j.publicUrl;
-      a.download = j.filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
-    drawnLayer._exportMessage = 'Exportación completada.';
-    markExportResult('success');
+    await exportLayer(drawnLayer);
+    setLayerExportResult(drawnLayer, 'success', 'Exportación completada.');
+    triggerLayerAction(drawnLayer, action);
   } catch (err) {
-    if (drawnLayer) {
-      drawnLayer._exportMessage = (err && err.message) ? err.message : 'Error en la exportación';
-      markExportResult('error');
-    }
-    // sin alert, el estado se muestra en el panel
+    const message = (err && err.message) ? err.message : 'Error en la exportación';
+    setLayerExportResult(drawnLayer, 'error', message);
   } finally {
     hideModal();
   }
 });
+
+window.addEventListener('beforeunload', function () {
+  rectangles.forEach(function (layer) {
+    clearLayerExportCache(layer);
+  });
+});
+
+updatePendingExportButton();

@@ -17,6 +17,8 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 - Eliminar rectángulos con clic central o tecla `Supr`.
 - Cálculo de área en tiempo real y validación de límite máximo.
 - Exportación a fichero (`Descargar`) o envío directo a `JOSM`.
+- Procesamiento masivo de rectángulos ámbar con progreso `(n/X completados)`.
+- Reutilización de exportaciones correctas: rectángulos verdes se descargan/abren sin relanzar exportación.
 - Estado visual por rectángulo (pendiente, éxito, error).
 - Búsqueda de ubicaciones, selector de capas y persistencia de vista del mapa en la sesión.
 
@@ -44,6 +46,13 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 8. Exporta:
    - `Descargar`: baja el `GeoJSON` en el navegador.
    - `JOSM`: abre Remote Control en `127.0.0.1:8111` para importar la capa en JOSM.
+9. Para exportar en bloque:
+   - Pulsa `Procesar rectángulos ámbar (X)`.
+   - Se mostrará el modal `Procesando, espera... (n/X completados)`.
+   - Durante ese proceso, la interfaz queda bloqueada hasta terminar.
+10. Una vez un rectángulo esté en verde:
+   - `Descargar` o `JOSM` reutiliza su exportación ya preparada.
+   - No se vuelve a lanzar `/export` para ese rectángulo mientras no cambie su geometría.
 
 ## Controles
 
@@ -52,6 +61,7 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 - Clic derecho en rectángulo: clona el rectángulo y activa el clon.
 - Clic central en rectángulo: elimina ese rectángulo.
 - Tecla `Supr`: elimina el rectángulo activo.
+- Botón `Procesar rectángulos ámbar`: exporta en secuencia todos los pendientes.
 
 ## Reglas y validaciones
 
@@ -62,6 +72,10 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 - Se descartan rectángulos demasiado pequeños (umbral interno: `100 m²`).
 - Cada rectángulo guarda su propio estado de exportación.
 - Si modificas geometría (mover/escalar/rotar), el estado previo de exportación se reinicia.
+- El proceso masivo exporta solo rectángulos en estado pendiente (ámbar/azul).
+- Cada rectángulo actualiza su color al finalizar su exportación individual:
+  - Verde si tuvo éxito.
+  - Rojo si falló.
 
 ## Significado de colores
 
