@@ -214,6 +214,78 @@ function hasValidLatLngs(layer) {
   });
 }
 
+function cloneLatLngs(latlngs) {
+  if (!Array.isArray(latlngs)) return latlngs;
+  return latlngs.map(function (item) {
+    if (Array.isArray(item)) return cloneLatLngs(item);
+    return L.latLng(item.lat, item.lng, item.alt);
+  });
+}
+
+function walkLatLngs(latlngs, cb) {
+  if (Array.isArray(latlngs)) {
+    latlngs.forEach(function (item) { walkLatLngs(item, cb); });
+    return;
+  }
+  if (latlngs && Number.isFinite(latlngs.lat) && Number.isFinite(latlngs.lng)) {
+    cb(latlngs);
+  }
+}
+
+function rebuildLayerBounds(layer) {
+  if (!layer || typeof layer.getLatLngs !== 'function') return false;
+  const latlngs = layer.getLatLngs();
+  if (!latlngs) return false;
+  const bounds = L.latLngBounds([]);
+  walkLatLngs(latlngs, function (p) {
+    bounds.extend(L.latLng(p.lat, p.lng, p.alt));
+  });
+  if (typeof bounds.isValid === 'function' && !bounds.isValid()) return false;
+  let sw;
+  let ne;
+  try {
+    sw = bounds.getSouthWest();
+    ne = bounds.getNorthEast();
+  } catch (err) {
+    return false;
+  }
+  if (!sw || !ne) return false;
+  layer._bounds = L.latLngBounds(
+    L.latLng(sw.lat, sw.lng, sw.alt),
+    L.latLng(ne.lat, ne.lng, ne.alt)
+  );
+  return true;
+}
+
+function getRectangleCloneOptions(sourceLayer) {
+  const sourceOptions = sourceLayer && sourceLayer.options ? sourceLayer.options : {};
+  const cloneOptions = {};
+  const optionKeys = [
+    'stroke',
+    'color',
+    'weight',
+    'opacity',
+    'lineCap',
+    'lineJoin',
+    'dashArray',
+    'dashOffset',
+    'fill',
+    'fillColor',
+    'fillOpacity',
+    'fillRule',
+    'bubblingMouseEvents',
+    'interactive',
+    'pane',
+    'className'
+  ];
+  optionKeys.forEach(function (key) {
+    if (Object.prototype.hasOwnProperty.call(sourceOptions, key)) {
+      cloneOptions[key] = sourceOptions[key];
+    }
+  });
+  return cloneOptions;
+}
+
 function getPolygonArea(layer) {
   try {
     if (!hasValidLatLngs(layer) || !L.GeometryUtil || typeof L.GeometryUtil.geodesicArea !== 'function') return null;
@@ -239,8 +311,23 @@ function getValidBounds(layer) {
     return null;
   }
   if (!b || !b.getSouthWest || !b.getNorthEast) return null;
-  const sw = b.getSouthWest();
-  const ne = b.getNorthEast();
+  if (typeof b.isValid === 'function' && !b.isValid()) {
+    if (!rebuildLayerBounds(layer)) return null;
+    try {
+      b = layer.getBounds();
+    } catch (err) {
+      return null;
+    }
+    if (!b || (typeof b.isValid === 'function' && !b.isValid())) return null;
+  }
+  let sw;
+  let ne;
+  try {
+    sw = b.getSouthWest();
+    ne = b.getNorthEast();
+  } catch (err) {
+    return null;
+  }
   if (!sw || !ne) return null;
   if (!Number.isFinite(sw.lat) || !Number.isFinite(sw.lng) || !Number.isFinite(ne.lat) || !Number.isFinite(ne.lng)) return null;
   return b;
@@ -251,7 +338,11 @@ function disableRectangleTransform(layer) {
   const sync = layer._transformSync;
   layer.off('transform transformstart transformed drag dragend');
   if (layer.transform && typeof layer.transform.disable === 'function') {
-    layer.transform.disable();
+    try {
+      layer.transform.disable();
+    } catch (err) {
+      console.warn('PathTransform disable failed:', err);
+    }
     if (layer.transform._handlesGroup) {
       try { map.removeLayer(layer.transform._handlesGroup); } catch (e) {}
       layer.transform._handlesGroup = null;
@@ -259,7 +350,11 @@ function disableRectangleTransform(layer) {
     layer.transform = null;
   }
   if (layer.dragging && typeof layer.dragging.disable === 'function') {
-    layer.dragging.disable();
+    try {
+      layer.dragging.disable();
+    } catch (err) {
+      console.warn('PathDrag disable failed:', err);
+    }
     layer.dragging = null;
   }
   delete layer._transformSync;
@@ -364,6 +459,55 @@ function removeRectangle(layer) {
   }
 }
 
+function cloneRectangleLayer(sourceLayer) {
+  if (!sourceLayer || typeof sourceLayer.getLatLngs !== 'function') return null;
+  const latlngs = sourceLayer.getLatLngs();
+  if (!latlngs) return null;
+  const cloneOptions = getRectangleCloneOptions(sourceLayer);
+  const clonedLatLngs = cloneLatLngs(latlngs);
+
+  const clone = L.polygon(clonedLatLngs, cloneOptions).addTo(map);
+  rebuildLayerBounds(clone);
+  clone._exportStatus = null;
+  clone._exportMessage = '';
+
+  setupRectangleLayer(clone);
+  activateRectangle(clone);
+  setAllRectanglesInteractive(true);
+  updateExportStatusUI();
+  return clone;
+}
+
+function setupRectangleLayer(layer) {
+  if (!layer) return;
+  rectangles.push(layer);
+  layer.on('click', function () {
+    if (isDrawing) return;
+    activateRectangle(layer);
+  });
+  layer.on('mousedown', function (ev) {
+    if (ev.originalEvent && ev.originalEvent.button === 1) {
+      L.DomEvent.preventDefault(ev.originalEvent);
+      L.DomEvent.stopPropagation(ev.originalEvent);
+      removeRectangle(layer);
+    }
+  });
+  layer.on('contextmenu', function (ev) {
+    if (isDrawing) return;
+    const originalEvent = ev && ev.originalEvent ? ev.originalEvent : ev;
+    if (originalEvent) {
+      L.DomEvent.preventDefault(originalEvent);
+      L.DomEvent.stopPropagation(originalEvent);
+    }
+    setTimeout(function () {
+      if (!layer || !layer._map) return;
+      cloneRectangleLayer(layer);
+    }, 0);
+  });
+  // Asegurar pointer events activos para selección futura
+  setLayerInteractive(layer, true);
+}
+
 function markExportResult(status) {
   if (!drawnLayer) return;
   drawnLayer._exportStatus = status; // 'success' | 'error'
@@ -411,6 +555,7 @@ function enableRectangleTransform(layer) {
     setTimeout(function () { enableRectangleTransform(layer); }, 50);
     return;
   }
+  rebuildLayerBounds(layer);
 
   function syncBounds() {
     try {
@@ -434,11 +579,27 @@ function enableRectangleTransform(layer) {
   }
 
   if (layer.transform && typeof layer.transform.enable === 'function') {
-    layer.transform.enable({
+    const transformOptions = {
       rotation: true,
       scaling: true,
       uniformScaling: uniformScalingEnabled
-    });
+    };
+    try {
+      layer.transform.enable(transformOptions);
+    } catch (err) {
+      const repaired = rebuildLayerBounds(layer);
+      if (!repaired) {
+        console.warn('No se pudo reparar bounds antes de activar transformación:', err);
+        return;
+      }
+      try {
+        layer.transform = new L.Handler.PathTransform(layer);
+        layer.transform.enable(transformOptions);
+      } catch (retryErr) {
+        console.warn('No se pudo activar PathTransform tras reintento:', retryErr);
+        return;
+      }
+    }
     layer.off('transform', syncBounds);
     layer.off('transformed', syncBounds);
     layer.on('transform', function () {
@@ -537,20 +698,7 @@ map.on(L.Draw.Event.CREATED, function (e) {
     return;
   }
 
-  rectangles.push(layer);
-  layer.on('click', function () {
-    if (isDrawing) return;
-    activateRectangle(layer);
-  });
-  layer.on('mousedown', function (ev) {
-    if (ev.originalEvent && ev.originalEvent.button === 1) {
-      L.DomEvent.preventDefault(ev.originalEvent);
-      L.DomEvent.stopPropagation(ev.originalEvent);
-      removeRectangle(layer);
-    }
-  });
-  // Asegurar pointer events activos para selección futura
-  setLayerInteractive(layer, true);
+  setupRectangleLayer(layer);
   activateRectangle(layer);
   isDrawing = false;
   setAllRectanglesInteractive(true);
