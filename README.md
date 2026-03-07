@@ -1,44 +1,133 @@
-# Descarga catastro
+# Descarga Catastro
 
-Esta web permite dibujar y manipular varios rectángulos en el mapa (bounding box) y descargar la información sobre *edificios*, *partes de edificios* y *otras edificaciones*, que se encuentren en el servicio web WFS de https://www.catastro.hacienda.gob.es/webinspire/index.html dentro del área dibujada.
+Aplicación web para seleccionar zonas en el mapa y descargar datos de construcciones del servicio WFS INSPIRE de Catastro:
 
-Se usan colores en los rectángulos para ayudar a organizarse cuando se exportan zonas grandes.
+- `bu:Building`
+- `bu:BuildingPart`
+- `bu:OtherConstruction` (piscinas al aire libre)
 
-Colores:
+La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 
-- Ámbar: sin exportar.
-- Verde: exportación satisfactoria.
-- Rojo: fallo al exportar.
+## Funcionalidades
 
-Controles
--------------------
-- Clic izquierdo: seleccionar/mover/rotar/escalar el rectángulo activo.
-- Clic central o tecla Supr: eliminar el rectángulo.
+- Dibujo de múltiples rectángulos sobre el mapa.
+- Selección de rectángulo activo.
+- Mover, rotar y escalar el rectángulo activo.
+- Clonar rectángulos con clic derecho (el clon pasa a ser el activo).
+- Eliminar rectángulos con clic central o tecla `Supr`.
+- Cálculo de área en tiempo real y validación de límite máximo.
+- Exportación a fichero (`Descargar`) o envío directo a `JOSM`.
+- Estado visual por rectángulo (pendiente, éxito, error).
+- Búsqueda de ubicaciones, selector de capas y persistencia de vista del mapa en la sesión.
 
+## Guía de uso (paso a paso)
 
-## Build local con Docker
+1. Abre la aplicación en el navegador.
+2. Localiza la zona:
+   - Usa la búsqueda (arriba a la izquierda), o
+   - Navega manualmente con zoom y arrastre.
+3. Opcional: activa/desactiva capas en el selector:
+   - Base: OpenStreetMap.
+   - Superposiciones: PNOA y Catastro.
+4. Dibuja un rectángulo con la herramienta de dibujo.
+5. Ajusta el rectángulo activo:
+   - Arrastra para mover.
+   - Usa los manejadores para escalar/rotar.
+   - Usa el interruptor `Escalado uniforme` para mantener proporciones al escalar.
+6. Si necesitas zonas similares:
+   - Haz clic derecho sobre un rectángulo para clonarlo.
+   - El clon queda seleccionado automáticamente.
+7. Revisa el panel lateral:
+   - Coordenadas `xmin ymin xmax ymax` (WGS84).
+   - Botón de copia de coordenadas.
+   - Área estimada y aviso de límite.
+8. Exporta:
+   - `Descargar`: baja el `GeoJSON` en el navegador.
+   - `JOSM`: abre Remote Control en `127.0.0.1:8111` para importar la capa en JOSM.
 
-### Usando docker build
+## Controles
 
-Puerto por defecto: `8000` (configurable con variables de entorno)
+- Clic izquierdo en rectángulo: selecciona rectángulo activo.
+- Arrastre y manejadores: mover, escalar, rotar el rectángulo activo.
+- Clic derecho en rectángulo: clona el rectángulo y activa el clon.
+- Clic central en rectángulo: elimina ese rectángulo.
+- Tecla `Supr`: elimina el rectángulo activo.
+
+## Reglas y validaciones
+
+- Área máxima permitida: `0.5 km²`.
+- Si se supera el límite:
+  - Se muestra aviso `Máx 0.5 km²`.
+  - Se deshabilitan `Descargar` y `JOSM`.
+- Se descartan rectángulos demasiado pequeños (umbral interno: `100 m²`).
+- Cada rectángulo guarda su propio estado de exportación.
+- Si modificas geometría (mover/escalar/rotar), el estado previo de exportación se reinicia.
+
+## Significado de colores
+
+- Azul: rectángulo activo pendiente de exportar.
+- Ámbar: rectángulo inactivo pendiente de exportar.
+- Verde: última exportación correcta.
+- Rojo: última exportación con error.
+
+## Exportación a JOSM
+
+Para que funcione el botón `JOSM`:
+
+1. Abre JOSM.
+2. Activa `Remote Control` en preferencias.
+3. Permite peticiones locales a `http://127.0.0.1:8111`.
+
+Si el navegador bloquea ventanas emergentes, permite popups para este sitio.
+
+## Ejecución local
+
+Puerto por defecto: `8000` (configurable con `PORT`).
+
+### Opción recomendada: Docker
+
+#### Docker build/run
 
 1. Construir imagen:
    `docker build -t descarga-catastro .`
-
 2. Ejecutar contenedor:
    `docker run --rm --init -p 8000:8000 descarga-catastro`
+3. Abrir:
+   `http://localhost:8000`
 
-3. Abrir en el navegador:
-   http://localhost:8000
-   
+#### Docker Compose
 
-### Usando docker-compose
-
-~~~ sh
-# Arrancar por primera vez.
+```sh
+# Primera ejecución (con build)
 docker-compose up --build
-# Arranque normal.
+
+# Siguientes ejecuciones
 docker-compose up
-# Detener y limpiar.
+
+# Parar y limpiar
 docker-compose down
-~~~
+```
+
+### Opción sin Docker
+
+Requiere herramientas del sistema usadas por `run_export.sh`: `curl`, `jq`, `proj (cs2cs)`, `gdal/ogr2ogr/ogrinfo`, `spatialite`.
+
+1. Instalar dependencias de Node:
+   `npm install`
+2. Asegurar permisos del script:
+   `chmod +x run_export.sh`
+3. Arrancar servidor:
+   `npm start`
+4. Abrir:
+   `http://localhost:8000`
+
+## Resolución de problemas
+
+- Error de teselas de Catastro:
+  - El servicio puede fallar fuera de España o por disponibilidad temporal.
+- `JOSM` no abre nada:
+  - Revisa que JOSM esté abierto con Remote Control activo.
+- Exportación devuelve error:
+  - Prueba una zona menor.
+  - Verifica conectividad al WFS de Catastro.
+  - Reintenta más tarde si hay caída temporal del servicio.
