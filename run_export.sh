@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-if [ "$#" -ne 4 ]; then
-  echo "Uso: $0 minLon minLat maxLon maxLat"
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+  echo "Uso: $0 minLon minLat maxLon maxLat [clipWkt]"
   exit 1
 fi
 
@@ -10,6 +10,7 @@ MINLON=$1
 MINLAT=$2
 MAXLON=$3
 MAXLAT=$4
+CLIP_WKT=${5:-}
 S_SRS=EPSG:3857
 T_SRS=EPSG:4326
 
@@ -93,11 +94,16 @@ npx mapshaper -quiet \
 ogr2ogr -f SQLite "$OUTDIR/db.sqlite" "$FILE" -dsco SPATIALITE=YES
 
 # apply SQL logic to clean features
+TARGET_WKT="$CLIP_WKT"
+if [ -z "$TARGET_WKT" ]; then
+  TARGET_WKT="POLYGON((${MINLON} ${MINLAT}, ${MAXLON} ${MINLAT}, ${MAXLON} ${MAXLAT}, ${MINLON} ${MAXLAT}, ${MINLON} ${MINLAT}))"
+fi
+
 spatialite -silent "$OUTDIR/db.sqlite" <<SQL
--- Delete building or its parts whenever are out of the bbox
-WITH bbox AS (
+-- Delete building or its parts whenever are out of the selected area
+WITH clip AS (
   SELECT ST_GeomFromText(
-    'POLYGON((${MINLON} ${MINLAT}, ${MAXLON} ${MINLAT}, ${MAXLON} ${MAXLAT}, ${MINLON} ${MAXLAT}, ${MINLON} ${MINLAT}))',
+    '${TARGET_WKT}',
     ${T_SRS#EPSG:}
   ) AS geom
 )
@@ -105,22 +111,22 @@ DELETE FROM combined_buildings AS cb
 WHERE
   EXISTS (
     SELECT 1
-    FROM combined_buildings AS b, bbox
+    FROM combined_buildings AS b, clip
     WHERE b.building IS NOT NULL
-      AND NOT ST_Within(b.geometry, bbox.geom)
+      AND COALESCE(ST_Within(b.geometry, clip.geom), 0) = 0
       AND (
         ST_Equals(b.geometry, cb.geometry)
-        OR ST_Within(cb.geometry, b.geometry)
+        OR COALESCE(ST_Within(cb.geometry, b.geometry), 0) = 1
       )
   )
   OR (
     cb."building:part" IS NOT NULL
     AND EXISTS (
       SELECT 1
-      FROM combined_buildings AS b2, bbox
+      FROM combined_buildings AS b2, clip
       WHERE b2.building IS NOT NULL
-        AND NOT ST_Within(b2.geometry, bbox.geom)
-        AND ST_Within(cb.geometry, b2.geometry)
+        AND COALESCE(ST_Within(b2.geometry, clip.geom), 0) = 0
+        AND COALESCE(ST_Within(cb.geometry, b2.geometry), 0) = 1
     )
   );
 
@@ -131,7 +137,7 @@ WHERE p."building:part" IS NOT NULL
       SELECT 1
       FROM combined_buildings AS b
       WHERE b.building IS NOT NULL
-        AND ST_Within(p.geometry, b.geometry)
+        AND COALESCE(ST_Within(p.geometry, b.geometry), 0) = 1
   );
 
 -- Compute maximum building:levels from inner parts
@@ -140,7 +146,7 @@ SET "building:levels" = (
     SELECT MAX(CAST(p."building:levels" AS INTEGER))
     FROM combined_buildings AS p
     WHERE p."building:part" IS NOT NULL
-      AND ST_Within(p.geometry, b.geometry)
+      AND COALESCE(ST_Within(p.geometry, b.geometry), 0) = 1
 )
 WHERE b.building IS NOT NULL;
 
@@ -170,6 +176,16 @@ WHERE
   (
     CAST("building:levels" AS INTEGER) = 0
   );
+
+-- Safety filter: remove any geometry that is out of the selected area.
+DELETE FROM combined_buildings
+WHERE COALESCE(
+  ST_Within(
+    geometry,
+    ST_GeomFromText('${TARGET_WKT}', ${T_SRS#EPSG:})
+  ),
+  0
+) = 0;
 SQL
 
 ogr2ogr -f GeoJSON "${FILE}.1" "$OUTDIR/db.sqlite"

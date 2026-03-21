@@ -13,6 +13,75 @@ fs.mkdirSync(EXPORTS_BASE, { recursive: true });
 
 function makeId() { return Date.now().toString(36).toString('hex'); }
 
+function buildClipWkt(rawClipCoords) {
+  if (rawClipCoords == null || rawClipCoords === '') return null;
+
+  let coords;
+  try {
+    coords = JSON.parse(rawClipCoords);
+  } catch (err) {
+    throw new Error('invalid clip polygon json');
+  }
+  if (!Array.isArray(coords) || coords.length < 4) {
+    throw new Error('clip polygon requires at least 4 coordinates');
+  }
+
+  const points = coords.map((pair) => {
+    if (!Array.isArray(pair) || pair.length < 2) {
+      throw new Error('invalid clip coordinate pair');
+    }
+    const lon = Number(pair[0]);
+    const lat = Number(pair[1]);
+    if (!isFinite(lon) || !isFinite(lat)) {
+      throw new Error('invalid clip coordinate number');
+    }
+    if (lon < -180 || lon > 180 || lat < -90 || lat > 90) {
+      throw new Error('clip coordinate out of range');
+    }
+    return { lon, lat };
+  });
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const closed = first && last && first.lon === last.lon && first.lat === last.lat;
+  if (!closed) {
+    points.push({ lon: first.lon, lat: first.lat });
+  }
+
+  const unique = new Set(points.slice(0, -1).map(p => `${p.lon.toFixed(8)},${p.lat.toFixed(8)}`));
+  if (unique.size < 3) {
+    throw new Error('clip polygon must have at least 3 unique points');
+  }
+
+  // Para rectángulos rotados: reordenar vértices por ángulo para evitar anillos autocruzados.
+  if (unique.size === 4) {
+    const uniquePoints = Array.from(
+      new Map(points.slice(0, -1).map((p) => [`${p.lon.toFixed(8)},${p.lat.toFixed(8)}`, p])).values()
+    );
+    const centroid = uniquePoints.reduce((acc, p) => ({
+      lon: acc.lon + p.lon,
+      lat: acc.lat + p.lat
+    }), { lon: 0, lat: 0 });
+    centroid.lon /= uniquePoints.length;
+    centroid.lat /= uniquePoints.length;
+
+    uniquePoints.sort((a, b) => {
+      const angleA = Math.atan2(a.lat - centroid.lat, a.lon - centroid.lon);
+      const angleB = Math.atan2(b.lat - centroid.lat, b.lon - centroid.lon);
+      return angleA - angleB;
+    });
+
+    points.length = 0;
+    uniquePoints.forEach((p) => points.push({ lon: p.lon, lat: p.lat }));
+    points.push({ lon: uniquePoints[0].lon, lat: uniquePoints[0].lat });
+  }
+
+  const wktCoords = points
+    .map((p) => `${p.lon.toFixed(8)} ${p.lat.toFixed(8)}`)
+    .join(', ');
+  return `POLYGON((${wktCoords}))`;
+}
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -27,13 +96,24 @@ app.post('/export', (req, res) => {
   }
   const coords = [xmin, ymin, xmax, ymax].map(Number);
   if (coords.some(c => !isFinite(c))) return res.status(400).send('invalid numbers');
+  let clipWkt = null;
+  try {
+    clipWkt = buildClipWkt(req.body.clip_coords);
+  } catch (err) {
+    return res.status(400).send('invalid clip polygon');
+  }
+  if (!clipWkt) {
+    return res.status(400).send('missing clip polygon');
+  }
 
   const script = path.join(__dirname, 'run_export.sh');
   if (!fs.existsSync(script) || !(fs.statSync(script).mode & 0o111)) {
     return res.status(500).send('run_export.sh not found or not executable');
   }
 
-  const child = spawn(script, coords.map(c => String(c)));
+  const spawnArgs = coords.map(c => String(c));
+  spawnArgs.push(clipWkt);
+  const child = spawn(script, spawnArgs);
 
   let stdout = '';
   let stderr = '';

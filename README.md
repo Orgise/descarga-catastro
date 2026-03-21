@@ -81,6 +81,7 @@ La salida se genera en `GeoJSON` listo para revisión o carga en JOSM.
 - Cada rectángulo actualiza su color al finalizar su exportación individual:
   - Verde si tuvo éxito.
   - Rojo si falló.
+- El recorte final de exportación respeta la rotación del rectángulo seleccionado.
 
 ## Significado de colores
 

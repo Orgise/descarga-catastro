@@ -936,6 +936,59 @@ function getLayerCoords(layer) {
   };
 }
 
+function getLayerRingLatLngs(layer) {
+  if (!layer || typeof layer.getLatLngs !== 'function') return null;
+  let latlngs = layer.getLatLngs();
+  if (!Array.isArray(latlngs) || !latlngs.length) return null;
+  if (Array.isArray(latlngs[0])) latlngs = latlngs[0];
+  if (!Array.isArray(latlngs) || latlngs.length < 3) return null;
+
+  const ring = latlngs.map(function (p) {
+    return L.latLng(p.lat, p.lng, p.alt);
+  });
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (!first || !last) return null;
+
+  const closed = Math.abs(first.lat - last.lat) < 1e-12 && Math.abs(first.lng - last.lng) < 1e-12;
+  if (!closed) {
+    ring.push(L.latLng(first.lat, first.lng, first.alt));
+  }
+  return ring;
+}
+
+function getLayerClipCoords(layer) {
+  const ring = getLayerRingLatLngs(layer);
+  if (!ring || ring.length < 4) {
+    throw new Error('No se pudo construir el polígono de recorte.');
+  }
+
+  // Normalizar vértices para evitar anillos autocruzados por orden inesperado.
+  const uniqueMap = new Map();
+  ring.forEach(function (p) {
+    const lng = Number(p.lng.toFixed(8));
+    const lat = Number(p.lat.toFixed(8));
+    uniqueMap.set(`${lng},${lat}`, [lng, lat]);
+  });
+  const points = Array.from(uniqueMap.values());
+  if (points.length < 3) {
+    throw new Error('No se pudo construir el polígono de recorte.');
+  }
+
+  const centroid = points.reduce(function (acc, pt) {
+    return [acc[0] + pt[0], acc[1] + pt[1]];
+  }, [0, 0]).map(function (sum) { return sum / points.length; });
+
+  points.sort(function (a, b) {
+    const angleA = Math.atan2(a[1] - centroid[1], a[0] - centroid[0]);
+    const angleB = Math.atan2(b[1] - centroid[1], b[0] - centroid[0]);
+    return angleA - angleB;
+  });
+
+  points.push([points[0][0], points[0][1]]);
+  return points;
+}
+
 function validateLayerAreaForExport(layer, coords) {
   const polyArea = getPolygonArea(layer);
   const bboxArea = estimateRectArea(coords.xmin, coords.ymin, coords.xmax, coords.ymax);
@@ -946,12 +999,13 @@ function validateLayerAreaForExport(layer, coords) {
   }
 }
 
-async function requestLayerExport(coords) {
+async function requestLayerExport(layer, coords) {
   const data = new URLSearchParams();
   data.set('xmin', String(coords.xmin));
   data.set('ymin', String(coords.ymin));
   data.set('xmax', String(coords.xmax));
   data.set('ymax', String(coords.ymax));
+  data.set('clip_coords', JSON.stringify(getLayerClipCoords(layer)));
 
   const resp = await fetch('/export', {
     method: 'POST',
@@ -994,7 +1048,7 @@ async function exportLayer(layer) {
   if (!layer) throw new Error('No hay rectángulo activo.');
   const coords = getLayerCoords(layer);
   validateLayerAreaForExport(layer, coords);
-  const exportInfo = await requestLayerExport(coords);
+  const exportInfo = await requestLayerExport(layer, coords);
   await cacheLayerExport(layer, exportInfo);
   return exportInfo;
 }
