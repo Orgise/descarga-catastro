@@ -56,6 +56,7 @@ var prevActiveOnDraw = null;
 const MIN_RECT_AREA_M2 = 100;
 var isDrawing = false;
 var isBatchExporting = false;
+let renderRepairTimer = null;
 var drawControl = new L.Control.Draw({
   draw: { rectangle: true, polygon: false, polyline: false, circle: false, marker: false, circlemarker: false },
 });
@@ -205,14 +206,27 @@ if (uniformScalingToggle) {
 }
 
 function hasValidLatLngs(layer) {
-  if (!layer || typeof layer.getLatLngs !== 'function') return false;
-  let latlngs = layer.getLatLngs();
+  if (!layer) return false;
+  let latlngs = getLayerLatLngsSafe(layer);
   if (!latlngs) return false;
   if (Array.isArray(latlngs[0])) latlngs = latlngs[0]; // polygon ring
   if (!Array.isArray(latlngs) || latlngs.length < 2) return false;
   return latlngs.every(function (p) {
     return p && Number.isFinite(p.lat) && Number.isFinite(p.lng);
   });
+}
+
+function getLayerLatLngsSafe(layer) {
+  if (!layer) return null;
+  if (typeof layer.getLatLngs === 'function') {
+    try {
+      const latlngs = layer.getLatLngs();
+      if (latlngs) return latlngs;
+    } catch (err) {
+      // En clones recién creados PathDrag puede lanzar de forma transitoria.
+    }
+  }
+  return layer._latlngs || null;
 }
 
 function cloneLatLngs(latlngs) {
@@ -234,8 +248,8 @@ function walkLatLngs(latlngs, cb) {
 }
 
 function rebuildLayerBounds(layer) {
-  if (!layer || typeof layer.getLatLngs !== 'function') return false;
-  const latlngs = layer.getLatLngs();
+  if (!layer) return false;
+  const latlngs = getLayerLatLngsSafe(layer);
   if (!latlngs) return false;
   const bounds = L.latLngBounds([]);
   walkLatLngs(latlngs, function (p) {
@@ -276,6 +290,7 @@ function getRectangleCloneOptions(sourceLayer) {
     'fillRule',
     'bubblingMouseEvents',
     'interactive',
+    'noClip',
     'pane',
     'className'
   ];
@@ -290,7 +305,7 @@ function getRectangleCloneOptions(sourceLayer) {
 function getPolygonArea(layer) {
   try {
     if (!hasValidLatLngs(layer) || !L.GeometryUtil || typeof L.GeometryUtil.geodesicArea !== 'function') return null;
-    let latlngs = layer.getLatLngs();
+    let latlngs = getLayerLatLngsSafe(layer);
     if (Array.isArray(latlngs) && Array.isArray(latlngs[0])) {
       latlngs = latlngs[0];
     }
@@ -374,6 +389,63 @@ function setAllRectanglesInteractive(enabled) {
   rectangles.forEach(function (r) {
     setLayerInteractive(r, enabled);
   });
+}
+
+function clearPathTransformArtifacts(layer) {
+  const path = layer && layer._path;
+  if (!path) return;
+  if (path.hasAttribute && path.hasAttribute('transform')) {
+    path.removeAttribute('transform');
+  }
+  if (path.style && path.style.transform) {
+    path.style.transform = '';
+  }
+}
+
+function hasDrawablePath(layer) {
+  const path = layer && layer._path;
+  if (!path) return false;
+  const d = path.getAttribute('d');
+  return typeof d === 'string' && d.length > 0 && d !== 'M0 0';
+}
+
+function resyncRectangleRendering(layer) {
+  if (!layer || !layer._map) return;
+  if (!hasValidLatLngs(layer)) return;
+
+  rebuildLayerBounds(layer);
+  clearPathTransformArtifacts(layer);
+  if (typeof layer.redraw === 'function') layer.redraw();
+
+  const b = getValidBounds(layer);
+  if (!b || !map.getBounds().intersects(b)) return;
+  if (hasDrawablePath(layer)) return;
+
+  const wasActive = layer === drawnLayer;
+  if (wasActive) disableRectangleTransform(layer);
+
+  map.removeLayer(layer);
+  layer.addTo(map);
+
+  clearPathTransformArtifacts(layer);
+  applyRectStyle(layer, wasActive);
+  setLayerInteractive(layer, true);
+
+  if (wasActive) {
+    enableRectangleTransform(layer);
+    const activeBounds = getValidBounds(layer);
+    if (activeBounds) setInputsFromBounds(activeBounds);
+  }
+}
+
+function scheduleRectanglesRenderingResync() {
+  if (renderRepairTimer) return;
+  renderRepairTimer = setTimeout(function () {
+    renderRepairTimer = null;
+    rectangles.forEach(function (layer) {
+      resyncRectangleRendering(layer);
+    });
+  }, 80);
 }
 
 function getPendingRectangles() {
@@ -517,8 +589,8 @@ function removeRectangle(layer) {
 }
 
 function cloneRectangleLayer(sourceLayer) {
-  if (!sourceLayer || typeof sourceLayer.getLatLngs !== 'function') return null;
-  const latlngs = sourceLayer.getLatLngs();
+  if (!sourceLayer) return null;
+  const latlngs = getLayerLatLngsSafe(sourceLayer);
   if (!latlngs) return null;
   const cloneOptions = getRectangleCloneOptions(sourceLayer);
   const clonedLatLngs = cloneLatLngs(latlngs);
@@ -536,6 +608,7 @@ function cloneRectangleLayer(sourceLayer) {
 
 function setupRectangleLayer(layer) {
   if (!layer) return;
+  if (layer.options) layer.options.noClip = true;
   rectangles.push(layer);
   updatePendingExportButton();
   layer.on('click', function () {
@@ -564,6 +637,7 @@ function setupRectangleLayer(layer) {
   });
   // Asegurar pointer events activos para selección futura
   setLayerInteractive(layer, true);
+  scheduleRectanglesRenderingResync();
 }
 
 function setLayerExportResult(layer, status, message) {
@@ -730,6 +804,7 @@ map.on(L.Draw.Event.DRAWSTART, function () {
 map.on(L.Draw.Event.CREATED, function (e) {
   if (isBatchExporting) return;
   const layer = e.layer.addTo(map);
+  if (layer.options) layer.options.noClip = true;
   resetLayerExportState(layer);
 
   // calcular área; si es demasiado pequeña, eliminar y restaurar anterior
@@ -761,6 +836,7 @@ map.on(L.Draw.Event.CREATED, function (e) {
   activateRectangle(layer);
   isDrawing = false;
   setAllRectanglesInteractive(true);
+  scheduleRectanglesRenderingResync();
   updateExportStatusUI();
 });
 
@@ -771,6 +847,8 @@ map.on(L.Draw.Event.DRAWSTOP, function () {
     setAllRectanglesInteractive(true);
   }
 });
+
+map.on('moveend zoomend viewreset resize', scheduleRectanglesRenderingResync);
 
 function readCoords() {
   var xmin = parseFloat(document.getElementById('xmin_input').value);
@@ -937,8 +1015,8 @@ function getLayerCoords(layer) {
 }
 
 function getLayerRingLatLngs(layer) {
-  if (!layer || typeof layer.getLatLngs !== 'function') return null;
-  let latlngs = layer.getLatLngs();
+  if (!layer) return null;
+  let latlngs = getLayerLatLngsSafe(layer);
   if (!Array.isArray(latlngs) || !latlngs.length) return null;
   if (Array.isArray(latlngs[0])) latlngs = latlngs[0];
   if (!Array.isArray(latlngs) || latlngs.length < 3) return null;
